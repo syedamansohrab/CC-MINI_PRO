@@ -1,0 +1,84 @@
+version: '3.8'
+
+networks:
+  raft-cluster:
+    driver: bridge
+
+services:
+  gateway:
+    image: node:20-alpine
+    working_dir: /app
+    volumes:
+      - ./gateway:/app
+      - /app/node_modules # <-- The magic fix
+    command: sh -c "npm install && npx nodemon index.js"
+    ports:
+      - "8080:8080"
+    networks:
+      - raft-cluster
+    depends_on:
+      - replica1
+      - replica2
+      - replica3
+
+  replica1:
+    image: node:20-alpine
+    working_dir: /app
+    volumes:
+      - ./replica1:/app
+      - /app/node_modules # <-- The magic fix
+    command: sh -c "npm install && npx nodemon index.js"
+    environment:
+      - REPLICA_ID=1
+      - PORT=3001
+      - PEERS=replica2:3002,replica3:3003
+    ports:
+      - "3001:3001"
+    networks:
+      - raft-cluster
+
+  replica2:
+    image: node:20-alpine
+    working_dir: /app
+    volumes:
+      - ./replica2:/app
+      - /app/node_modules # <-- The magic fix
+    command: sh -c "npm install && npx nodemon index.js"
+    environment:
+      - REPLICA_ID=2
+      - PORT=3002
+      - PEERS=replica1:3001,replica3:3003
+    ports:
+      - "3002:3002"
+    networks:
+      - raft-cluster
+
+  replica3:
+    image: node:20-alpine
+    working_dir: /app
+    volumes:
+      - ./replica3:/app
+      - /app/node_modules # <-- The magic fix
+    command: sh -c "npm install && npx nodemon index.js"
+    environment:
+      - REPLICA_ID=3
+      - PORT=3003
+      - PEERS=replica1:3001,replica2:3002
+    ports:
+      - "3003:3003"
+    networks:
+      - raft-cluster
+
+  frontend:
+    image: node:20-alpine
+    working_dir: /app
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    command: sh -c "npm install socket.io-client && npm install && npm run dev -- --host 0.0.0.0"
+    ports:
+      - "5173:5173"
+    networks:
+      - raft-cluster
+    depends_on:
+      - gateway
