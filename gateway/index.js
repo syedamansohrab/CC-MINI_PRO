@@ -11,17 +11,15 @@ app.use(express.json());
 
 const server = http.createServer(app);
 const io = new Server(server, {
-    cors: { origin: "*" } // Allow the frontend to connect from any port
+    cors: { origin: "*" } 
 });
 
-// The gateway doesn't decide the state; it just needs to know who the boss is!
 let currentLeader = null;
 
 // ---------------------------------------------------------
 // REST ENDPOINTS (For internal communication with Replicas)
 // ---------------------------------------------------------
 
-// 1. Replicas will call this endpoint when they win an election
 app.post('/set-leader', (req, res) => {
     const { leaderId, leaderUrl } = req.body;
     currentLeader = leaderUrl;
@@ -29,11 +27,37 @@ app.post('/set-leader', (req, res) => {
     res.sendStatus(200);
 });
 
-// 2. The Leader calls this when a stroke is safely committed to the log
 app.post('/broadcast', (req, res) => {
     const { stroke } = req.body;
-    io.emit('draw-stroke', stroke); // Broadcast to all connected browser clients
+    io.emit('draw-stroke', stroke); 
     res.sendStatus(200);
+});
+
+// ---------------------------------------------------------
+// DASHBOARD AGGREGATOR ENDPOINT (NEW)
+// ---------------------------------------------------------
+app.get('/cluster-status', async (req, res) => {
+    // We now have 4 replicas to check
+    const replicas = ['replica1:3001', 'replica2:3002', 'replica3:3003', 'replica4:3004'];
+    
+    const statuses = await Promise.all(replicas.map(async (url) => {
+        try {
+            // Fast timeout so one dead node doesn't hang the dashboard
+            const response = await axios.get(`http://${url}/status`, { timeout: 300 });
+            return response.data;
+        } catch (error) {
+            // If the node is dead/restarting, return an offline state
+            return { 
+                id: url.split(':')[0].replace('replica', ''), 
+                state: 'Offline ❌', 
+                term: '-', 
+                logSize: '-', 
+                commitIndex: '-' 
+            };
+        }
+    }));
+
+    res.json(statuses);
 });
 
 // ---------------------------------------------------------
@@ -43,7 +67,6 @@ app.post('/broadcast', (req, res) => {
 io.on('connection', (socket) => {
     console.log(`[GATEWAY] New browser client connected: ${socket.id}`);
 
-    // When a user draws on the canvas, they send a stroke here
     socket.on('send-stroke', async (stroke) => {
         if (!currentLeader) {
             console.log('[GATEWAY] No leader elected yet. Dropping stroke.');
@@ -51,12 +74,9 @@ io.on('connection', (socket) => {
         }
 
         try {
-            // Forward the stroke to the current active leader replica
             await axios.post(`${currentLeader}/process-stroke`, { stroke });
         } catch (error) {
             console.log('[GATEWAY] Failed to send stroke. The Leader might have crashed!');
-            // In the RAFT protocol, if this fails, the replicas will soon notice
-            // the leader is dead and elect a new one. The gateway will wait for the update.
         }
     });
 

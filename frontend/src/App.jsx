@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { io } from 'socket.io-client';
+import Dashboard from './Dashboard'; // <-- Import the Dashboard
 import './App.css';
 
 // Connect directly to our Gateway container on port 8080
@@ -71,7 +72,11 @@ function App() {
   const stopDrawing = () => setIsDrawing(false);
 
   return (
-    <div className="board-container">
+    <div className="board-container" style={{ display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
+      
+      {/* --- DASHBOARD INSERTED HERE --- */}
+      <Dashboard /> 
+      
       <h2>Distributed Whiteboard (Mini-RAFT)</h2>
       <p>Draw below. Strokes are validated by the Replica Cluster!</p>
       
