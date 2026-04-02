@@ -4,7 +4,7 @@ import Dashboard from './Dashboard'; // <-- Import the Dashboard
 import './App.css';
 
 // Connect directly to our Gateway container on port 8080
-const socket = io('http://localhost:8080');
+const socket = io();
 
 function App() {
   const canvasRef = useRef(null);
