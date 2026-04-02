@@ -16,6 +16,29 @@ const io = new Server(server, {
 
 let currentLeader = null;
 
+async function fetchLeaderBoardState() {
+    if (!currentLeader) {
+        return {
+            visibleStrokes: [],
+            canUndo: false,
+            canRedo: false,
+            totalOperations: 0
+        };
+    }
+
+    try {
+        const response = await axios.get(`${currentLeader}/board-state`, { timeout: 500 });
+        return response.data;
+    } catch (error) {
+        return {
+            visibleStrokes: [],
+            canUndo: false,
+            canRedo: false,
+            totalOperations: 0
+        };
+    }
+}
+
 // ---------------------------------------------------------
 // REST ENDPOINTS (For internal communication with Replicas)
 // ---------------------------------------------------------
@@ -27,9 +50,8 @@ app.post('/set-leader', (req, res) => {
     res.sendStatus(200);
 });
 
-app.post('/broadcast', (req, res) => {
-    const { stroke } = req.body;
-    io.emit('draw-stroke', stroke); 
+app.post('/broadcast-state', (req, res) => {
+    io.emit('board-state', req.body);
     res.sendStatus(200);
 });
 
@@ -67,6 +89,10 @@ app.get('/cluster-status', async (req, res) => {
 io.on('connection', (socket) => {
     console.log(`[GATEWAY] New browser client connected: ${socket.id}`);
 
+    fetchLeaderBoardState().then((boardState) => {
+        socket.emit('board-state', boardState);
+    });
+
     socket.on('send-stroke', async (stroke) => {
         if (!currentLeader) {
             console.log('[GATEWAY] No leader elected yet. Dropping stroke.');
@@ -77,6 +103,32 @@ io.on('connection', (socket) => {
             await axios.post(`${currentLeader}/process-stroke`, { stroke });
         } catch (error) {
             console.log('[GATEWAY] Failed to send stroke. The Leader might have crashed!');
+        }
+    });
+
+    socket.on('undo', async () => {
+        if (!currentLeader) {
+            console.log('[GATEWAY] No leader elected yet. Cannot process undo.');
+            return;
+        }
+
+        try {
+            await axios.post(`${currentLeader}/process-undo`);
+        } catch (error) {
+            console.log('[GATEWAY] Failed to process undo request.');
+        }
+    });
+
+    socket.on('redo', async () => {
+        if (!currentLeader) {
+            console.log('[GATEWAY] No leader elected yet. Cannot process redo.');
+            return;
+        }
+
+        try {
+            await axios.post(`${currentLeader}/process-redo`);
+        } catch (error) {
+            console.log('[GATEWAY] Failed to process redo request.');
         }
     });
 
