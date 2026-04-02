@@ -1,43 +1,105 @@
-// replica1/index.js (Copy this to all replica folders)
 const express = require('express');
 const axios = require('axios');
 const cors = require('cors');
+const { buildBoardState } = require('../shared/logCompensation');
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-// --- ENVIRONMENT CONFIGURATION ---
 const PORT = process.env.PORT || 3001;
-const REPLICA_ID = process.env.REPLICA_ID || "1";
-const PEERS = process.env.PEERS ? process.env.PEERS.split(',') : []; 
+const REPLICA_ID = process.env.REPLICA_ID || '1';
+const PEERS = process.env.PEERS ? process.env.PEERS.split(',') : [];
 const GATEWAY_URL = 'http://gateway:8080';
 
-// --- DYNAMIC QUORUM LOGIC ---
 const TOTAL_NODES = PEERS.length + 1;
 const QUORUM = Math.floor(TOTAL_NODES / 2) + 1;
 console.log(`[NODE ${REPLICA_ID}] Total Nodes: ${TOTAL_NODES} | Required Quorum: ${QUORUM}`);
 
-// --- RAFT PERSISTENT STATE ---
-let state = 'Follower'; 
+let state = 'Follower';
 let currentTerm = 0;
 let votedFor = null;
-let log = []; 
-let commitIndex = -1; 
+let log = [];
+let commitIndex = -1;
 
-// --- TIMERS ---
 let electionTimer = null;
 let heartbeatTimer = null;
 
 const getRandomElectionTimeout = () => Math.floor(Math.random() * (800 - 500 + 1)) + 500;
 
-// ---------------------------------------------------------
-// RAFT LOGIC: TIMERS & ELECTIONS
-// ---------------------------------------------------------
+function createOperationEntry(type, payload) {
+    return {
+        opId: `${REPLICA_ID}-${currentTerm}-${Date.now()}-${Math.random().toString(16).slice(2, 10)}`,
+        term: currentTerm,
+        type,
+        payload
+    };
+}
+
+function getCurrentBoardState() {
+    return buildBoardState(log, commitIndex);
+}
+
+async function announceLeadership() {
+    await axios.post(`${GATEWAY_URL}/set-leader`, {
+        leaderId: REPLICA_ID,
+        leaderUrl: `http://replica${REPLICA_ID}:${PORT}`
+    }).catch(() => {});
+}
+
+async function broadcastBoardState() {
+    const boardState = getCurrentBoardState();
+    await axios.post(`${GATEWAY_URL}/broadcast-state`, boardState).catch(() => {});
+}
+
+async function replicateCommittedEntry(entry) {
+    log.push(entry);
+    const entryIndex = log.length - 1;
+    let acks = 1;
+
+    const replicationPromises = PEERS.map(async (peer) => {
+        try {
+            const response = await axios.post(`http://${peer}/append-entries`, {
+                term: currentTerm,
+                leaderId: REPLICA_ID,
+                prevLogIndex: entryIndex - 1,
+                prevLogTerm: entryIndex - 1 >= 0 ? log[entryIndex - 1].term : null,
+                entries: [entry],
+                leaderCommit: commitIndex
+            }, { timeout: 500 });
+
+            if (response.data.success) {
+                acks++;
+            } else if (response.data.logLength !== undefined && response.data.logLength < log.length) {
+                console.log(`[NODE ${REPLICA_ID}] Follower ${peer} is behind. Initiating /sync-log...`);
+                const missingEntries = log.slice(response.data.logLength);
+
+                await axios.post(`http://${peer}/sync-log`, {
+                    missingEntries,
+                    leaderCommit: commitIndex
+                });
+                acks++;
+            }
+        } catch (error) { /* Dead peer */ }
+    });
+
+    await Promise.all(replicationPromises);
+
+    if (acks >= QUORUM && state === 'Leader') {
+        commitIndex = entryIndex;
+        await broadcastBoardState();
+        return true;
+    }
+
+    log.pop();
+    return false;
+}
 
 function resetElectionTimer() {
-    if (electionTimer) clearTimeout(electionTimer);
-    
+    if (electionTimer) {
+        clearTimeout(electionTimer);
+    }
+
     electionTimer = setTimeout(() => {
         startElection();
     }, getRandomElectionTimeout());
@@ -47,8 +109,8 @@ async function startElection() {
     state = 'Candidate';
     currentTerm++;
     const electionTerm = currentTerm;
-    votedFor = REPLICA_ID; 
-    let votesReceived = 1; 
+    votedFor = REPLICA_ID;
+    let votesReceived = 1;
 
     console.log(`[NODE ${REPLICA_ID}] Term ${electionTerm}: Timeout reached! Starting election...`);
 
@@ -72,7 +134,7 @@ async function startElection() {
     await Promise.all(votePromises);
 
     if (currentTerm !== electionTerm || state !== 'Candidate') {
-        return; 
+        return;
     }
 
     if (votesReceived >= QUORUM) {
@@ -86,40 +148,42 @@ async function startElection() {
 
 function becomeLeader() {
     state = 'Leader';
-    console.log(`\n👑 [NODE ${REPLICA_ID}] is now the LEADER for Term ${currentTerm}! 👑\n`);
-    
-    if (electionTimer) clearTimeout(electionTimer);
+    console.log(`\n[NODE ${REPLICA_ID}] is now the LEADER for Term ${currentTerm}!\n`);
 
-    axios.post(`${GATEWAY_URL}/set-leader`, { 
-        leaderId: REPLICA_ID, 
-        leaderUrl: `http://replica${REPLICA_ID}:${PORT}` 
-    }).catch(() => {});
+    if (electionTimer) {
+        clearTimeout(electionTimer);
+    }
+
+    announceLeadership().catch(() => {});
 
     sendHeartbeats();
     heartbeatTimer = setInterval(sendHeartbeats, 150);
+    broadcastBoardState().catch(() => {});
 }
 
 function sendHeartbeats() {
-    PEERS.forEach(peer => {
+    if (state === 'Leader') {
+        announceLeadership().catch(() => {});
+    }
+
+    PEERS.forEach((peer) => {
         axios.post(`http://${peer}/heartbeat`, {
             term: currentTerm,
             leaderId: REPLICA_ID
-        }, { timeout: 100 }).catch(() => {}); 
+        }, { timeout: 100 }).catch(() => {});
     });
 }
 
-// ---------------------------------------------------------
-// RPC ENDPOINTS (Internal Cluster Communication)
-// ---------------------------------------------------------
-
 app.post('/heartbeat', (req, res) => {
-    const { term, leaderId } = req.body;
+    const { term } = req.body;
 
     if (term >= currentTerm) {
         currentTerm = term;
         state = 'Follower';
         votedFor = null;
-        if (heartbeatTimer) clearInterval(heartbeatTimer);
+        if (heartbeatTimer) {
+            clearInterval(heartbeatTimer);
+        }
         resetElectionTimer();
     }
     res.json({ success: true, term: currentTerm });
@@ -143,61 +207,71 @@ app.post('/request-vote', (req, res) => {
     res.json({ term: currentTerm, voteGranted });
 });
 
-// ---------------------------------------------------------
-// STROKE REPLICATION & CONSENSUS LOGIC
-// ---------------------------------------------------------
-
 app.post('/process-stroke', async (req, res) => {
     if (state !== 'Leader') {
-        return res.status(400).json({ error: "I am not the leader!" });
+        return res.status(400).json({ error: 'I am not the leader!' });
     }
 
     const { stroke } = req.body;
-    const entry = { term: currentTerm, stroke: stroke };
-    log.push(entry);
-    const entryIndex = log.length - 1;
-
-    let acks = 1;
-
-    const replicationPromises = PEERS.map(async (peer) => {
-        try {
-            const response = await axios.post(`http://${peer}/append-entries`, {
-                term: currentTerm,
-                leaderId: REPLICA_ID,
-                prevLogIndex: entryIndex - 1,
-                prevLogTerm: entryIndex - 1 >= 0 ? log[entryIndex - 1].term : null,
-                entries: [entry],
-                leaderCommit: commitIndex
-            }, { timeout: 500 }); 
-
-            if (response.data.success) {
-                acks++;
-            } else if (response.data.logLength !== undefined && response.data.logLength < log.length) {
-                console.log(`[NODE ${REPLICA_ID}] Follower ${peer} is behind. Initiating /sync-log...`);
-                const missingEntries = log.slice(response.data.logLength);
-                
-                await axios.post(`http://${peer}/sync-log`, {
-                    missingEntries: missingEntries,
-                    leaderCommit: commitIndex
-                });
-                acks++; 
-            }
-        } catch (error) { /* Dead peer */ }
+    const strokeId = stroke.strokeId || `${REPLICA_ID}-stroke-${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
+    const entry = createOperationEntry('stroke', {
+        strokeId,
+        stroke: { ...stroke, strokeId }
     });
 
-    await Promise.all(replicationPromises);
+    const committed = await replicateCommittedEntry(entry);
 
-    if (acks >= QUORUM && state === 'Leader') {
-        commitIndex = entryIndex;
-        axios.post(`${GATEWAY_URL}/broadcast`, { stroke }).catch(() => {});
-        res.json({ success: true });
-    } else {
-        res.status(500).json({ error: "Quorum not reached" });
+    if (!committed) {
+        return res.status(500).json({ error: 'Quorum not reached' });
     }
+
+    res.json({ success: true, strokeId });
+});
+
+app.post('/process-undo', async (req, res) => {
+    if (state !== 'Leader') {
+        return res.status(400).json({ error: 'I am not the leader!' });
+    }
+
+    const { undoTargetStrokeId } = getCurrentBoardState();
+
+    if (!undoTargetStrokeId) {
+        return res.status(409).json({ error: 'Nothing to undo' });
+    }
+
+    const entry = createOperationEntry('undo', { targetStrokeId: undoTargetStrokeId });
+    const committed = await replicateCommittedEntry(entry);
+
+    if (!committed) {
+        return res.status(500).json({ error: 'Quorum not reached' });
+    }
+
+    res.json({ success: true, targetStrokeId: undoTargetStrokeId });
+});
+
+app.post('/process-redo', async (req, res) => {
+    if (state !== 'Leader') {
+        return res.status(400).json({ error: 'I am not the leader!' });
+    }
+
+    const { redoTargetStrokeId } = getCurrentBoardState();
+
+    if (!redoTargetStrokeId) {
+        return res.status(409).json({ error: 'Nothing to redo' });
+    }
+
+    const entry = createOperationEntry('redo', { targetStrokeId: redoTargetStrokeId });
+    const committed = await replicateCommittedEntry(entry);
+
+    if (!committed) {
+        return res.status(500).json({ error: 'Quorum not reached' });
+    }
+
+    res.json({ success: true, targetStrokeId: redoTargetStrokeId });
 });
 
 app.post('/append-entries', (req, res) => {
-    const { term, leaderId, prevLogIndex, prevLogTerm, entries, leaderCommit } = req.body;
+    const { term, prevLogIndex, entries, leaderCommit } = req.body;
 
     if (term < currentTerm) {
         return res.json({ term: currentTerm, success: false, logLength: log.length });
@@ -230,33 +304,33 @@ app.post('/append-entries', (req, res) => {
 
 app.post('/sync-log', (req, res) => {
     const { missingEntries, leaderCommit } = req.body;
-    
-    log.push(...missingEntries);
-    commitIndex = leaderCommit;
 
-    missingEntries.forEach(entry => {
-        axios.post(`${GATEWAY_URL}/broadcast`, { stroke: entry.stroke }).catch(() => {});
-    });
-    
+    log.push(...missingEntries);
+    commitIndex = Math.min(leaderCommit, log.length - 1);
+
     console.log(`[NODE ${REPLICA_ID}] Catch-up complete! Log size is now ${log.length}.`);
-    res.json({ success: true }); 
+    res.json({ success: true });
 });
 
-// ---------------------------------------------------------
-// DASHBOARD ENDPOINT (NEW)
-// ---------------------------------------------------------
+app.get('/board-state', (req, res) => {
+    res.json(getCurrentBoardState());
+});
+
 app.get('/status', (req, res) => {
+    const boardState = getCurrentBoardState();
     res.json({
         id: REPLICA_ID,
-        state: state,
+        state,
         term: currentTerm,
         logSize: log.length,
-        commitIndex: commitIndex
+        commitIndex,
+        visibleStrokes: boardState.visibleStrokes.length,
+        canUndo: boardState.canUndo,
+        canRedo: boardState.canRedo
     });
 });
 
-// Boot the node
 app.listen(PORT, () => {
     console.log(`[NODE ${REPLICA_ID}] Booted on port ${PORT}. Status: ${state}`);
-    resetElectionTimer(); 
+    resetElectionTimer();
 });

@@ -27,6 +27,7 @@ services:
     working_dir: /app
     volumes:
       - ./replica1:/app
+      - ./shared:/shared
       - /app/node_modules # <-- The magic fix
     command: sh -c "npm install && npx nodemon index.js"
     environment:
@@ -43,6 +44,7 @@ services:
     working_dir: /app
     volumes:
       - ./replica2:/app
+      - ./shared:/shared
       - /app/node_modules # <-- The magic fix
     command: sh -c "npm install && npx nodemon index.js"
     environment:
@@ -59,6 +61,7 @@ services:
     working_dir: /app
     volumes:
       - ./replica3:/app
+      - ./shared:/shared
       - /app/node_modules # <-- The magic fix
     command: sh -c "npm install && npx nodemon index.js"
     environment:
@@ -75,6 +78,7 @@ services:
     working_dir: /app
     volumes:
       - ./replica4:/app
+      - ./shared:/shared
       - /app/node_modules # <-- The magic fix
     command: sh -c "npm install && npx nodemon index.js"
     environment:
